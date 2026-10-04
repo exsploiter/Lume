@@ -13,6 +13,7 @@ export interface ExecutiveReport {
     estimatedIncidentExposure: number;
     estimatedOperationalExposure: number;
     riskLevel: string;
+    methodologyBasis?: string;
   };
   complianceSummary: { score: number; grade: string; status: string };
   recommendedActions: string[];
@@ -96,6 +97,7 @@ export function buildExecutiveReport(params: {
       estimatedIncidentExposure: financial.estimatedIncidentExposure,
       estimatedOperationalExposure: financial.estimatedOperationalExposure,
       riskLevel: financial.riskLevel,
+      methodologyBasis: financial.methodologyBasis,
     },
     complianceSummary: { score: compliance.score, grade: compliance.grade, status: compliance.status },
     recommendedActions: recommendedActions.slice(0, 3),

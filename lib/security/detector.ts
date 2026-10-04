@@ -24,6 +24,7 @@ import { calculateSecurityScore, calculateSecurityWeightedScore } from '@/lib/se
 import { mapOWASPIds } from '@/lib/security/owasp-mapper';
 import { mapCWEIds } from '@/lib/security/cwe-mapper';
 import { analyzeSecurityCollapse } from '@/lib/security/security-collapse';
+import { runTaintAnalysis } from '@/lib/security/taint-engine';
 
 type RuleContext = {
   file: ParsedFile;
@@ -58,7 +59,17 @@ const RULES: SecurityRule[] = [
     cweIds: ['CWE_798', 'CWE_259', 'CWE_321'],
     recommendation: 'Move secrets to environment variables or a managed secret store and rotate exposed values.',
     exploitability: 0.95,
-    match: ({ line }) => /(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|client[_-]?secret)\s*[:=]\s*['"][^'"]{8,}['"]/i.test(line) || /BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line),
+    match: ({ line }) => {
+      if (/process\.env\./.test(line)) return false;
+      if (/YOUR[_-]|EXAMPLE|TODO|REPLACE|CHANGEME|DUMMY|TEST|SAMPLE/i.test(line)) return false;
+      const match = line.match(/(?:api[_-]?key|secret|token|password|passwd|private[_-]?key|client[_-]?secret)\s*[:=]\s*['"]([^'"]{12,})['"]/i);
+      if (match) {
+        const val = match[1];
+        if (/^[A-Z0-9_]+$/.test(val) && (val.includes('KEY') || val.includes('SECRET') || val.includes('TOKEN') || val.includes('HERE'))) return false;
+        return true;
+      }
+      return /BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY/.test(line);
+    },
     suppress: ({ file }) => isTestLikePath(file.path),
   },
   {
@@ -71,7 +82,9 @@ const RULES: SecurityRule[] = [
     cweIds: ['CWE_89', 'CWE_564'],
     recommendation: 'Use parameterized queries or prepared statements and validate all query inputs.',
     exploitability: 0.9,
-    match: ({ line }) => /(select|insert|update|delete|query|execute|exec)\s*\([^)]*(?:\+|`\$\{|format\(|join\().*/i.test(line) || /from\s*\(.*req\.|body\.|params\.|query\./i.test(line),
+    match: ({ line }) =>
+      /\b(?:query|execute|raw|\$queryRawUnsafe)\s*\(\s*(?:['"`].*?\+.*?(?:req\.|body\.|params\.|query\.)|`[^`]*\$\{.*?(?:req\.|body\.|params\.|query\.)|\w+\s*\+\s*['"`])/i.test(line) ||
+      /\b(?:select|insert|update|delete)\b.*?(?:\+.*?req\.|`\$\{.*?req\.)/i.test(line),
   },
   {
     id: 'command-injection',
@@ -83,7 +96,8 @@ const RULES: SecurityRule[] = [
     cweIds: ['CWE_78'],
     recommendation: 'Avoid shell execution with user input. Use argument arrays and strict allowlists.',
     exploitability: 0.92,
-    match: ({ line }) => /(exec|execSync|spawn|spawnSync|system|popen)\s*\([^)]*(?:\+|`\$\{|req\.|body\.|query\.|params\.)/i.test(line),
+    match: ({ line }) =>
+      /\b(?:exec|execSync|spawn|spawnSync|system|popen)\s*\(\s*(?:['"`].*?\+.*?(?:req\.|body\.|params\.|query\.)|`[^`]*\$\{.*?(?:req\.|body\.|params\.|query\.)|(?:req\.|body\.|params\.|query\.))/i.test(line),
   },
   {
     id: 'eval-usage',
@@ -143,7 +157,7 @@ const RULES: SecurityRule[] = [
     cweIds: ['CWE_502', 'CWE_94A', 'CWE_611'],
     recommendation: 'Avoid unsafe deserializers, validate schemas, and keep untrusted data as plain data.',
     exploitability: 0.78,
-    match: ({ line }) => /(?:deserialize|unserialize|yaml\.load|jsyaml\.load|pickle|Marshal\.load|Object\.assign\s*\(.*req\.|JSON\.parse\s*\(.*req\.)/i.test(line),
+    match: ({ line }) => /(?:deserialize|unserialize|yaml\.load|jsyaml\.load|pickle|Marshal\.load)\s*\(/i.test(line),
   },
   {
     id: 'ssrf',
@@ -266,13 +280,38 @@ export function detectSecurityFindings(file: ParsedFile): SecurityFinding[] {
   const lines = file.content.split(/\r?\n/);
   const findings: SecurityFinding[] = [];
 
+  // 1. Run High-Precision AST Data-Flow / Taint Analysis
+  let taintFindings: SecurityFinding[] = [];
+  try {
+    taintFindings = runTaintAnalysis(file);
+    findings.push(...taintFindings);
+  } catch (err) {
+    console.warn(`[Taint Engine] AST analysis skipped for ${file.path}:`, err);
+  }
+
+  const astCoveredCategories = new Set(taintFindings.map((f) => f.category));
+
+  // 2. Run Heuristic Rules (with suppression and de-duplication)
   for (const rule of RULES) {
+    // If AST analysis already identified a verified taint path for this category in the file,
+    // avoid redundant/noisy regex duplicates on the same file
+    if (astCoveredCategories.has(rule.category) && (rule.category === 'Injection' || rule.category === 'SSRF' || rule.category === 'Path')) {
+      continue;
+    }
+
     const matchedLines: number[] = [];
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       const context: RuleContext = { file, lineNumber: index + 1, line, content: file.content };
       if (!rule.match(context)) continue;
       if (shouldSuppressFinding(rule, context)) continue;
+
+      // Extra false positive filter for secrets: ignore placeholder values like "YOUR_KEY", "TODO", "process.env"
+      if (rule.category === 'Secrets') {
+        if (/YOUR[_-]API|TODO|REPLACE_ME|EXAMPLE|dummy|CHANGEME|xxx+/i.test(line)) continue;
+        if (/process\.env\./.test(line)) continue;
+      }
+
       matchedLines.push(index + 1);
     }
 
@@ -287,8 +326,8 @@ export function detectSecurityFindings(file: ParsedFile): SecurityFinding[] {
     findings.push(buildFinding(rule, context, matchedLines.length));
   }
 
-  const lowerContent = file.content.toLowerCase();
-  if (isSecuritySensitivePath(file.path) && /password|secret|token/.test(lowerContent) && !isTestLikePath(file.path)) {
+  const hasHardcodedCredential = /(?:password|secret|token|apikey|private[_-]?key)\s*[:=]\s*['"][^'"]{12,}['"]/i.test(file.content);
+  if (isSecuritySensitivePath(file.path) && hasHardcodedCredential && !isTestLikePath(file.path)) {
     findings.push({
       id: makeFindingId('sensitive-path-secrets', file.path, 1, file.path),
       ruleId: 'sensitive-path-secrets',
@@ -388,8 +427,10 @@ export function analyzeSecurityRepository(params: {
   files: ParsedFile[];
   symbols: ASTSymbol[];
   blastRadiusMap: Map<string, number>;
+  scaFindings?: SecurityFinding[];
 }): SecurityAnalysisResult {
-  const findings = params.files.flatMap((file) => detectSecurityFindings(file));
+  const firstPartyFindings = params.files.flatMap((file) => detectSecurityFindings(file));
+  const findings = [...firstPartyFindings, ...(params.scaFindings || [])];
   const summary = summarizeSecurityFindings(findings);
   const nodeMetrics = buildNodeMetrics(findings, params.symbols, params.blastRadiusMap);
   const repoSecurityScore = clampScore(

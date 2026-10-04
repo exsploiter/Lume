@@ -101,6 +101,23 @@ export async function POST(request: NextRequest) {
       console.error("[Explain Warning] Failed saving AI explanation to database:", saveErr);
     }
 
+    try {
+      const { logAuditEvent } = await import('@/lib/security/audit-logger');
+      await logAuditEvent({
+        eventType: 'EXPLANATION_REQUEST',
+        severity: 'info',
+        status: 'success',
+        details: {
+          nodeId,
+          symbolName: node.symbol_name,
+          filePath: node.file_path || filePath,
+          debtScore: node.debt_score !== undefined ? node.debt_score : debtScore,
+        },
+      });
+    } catch {
+      // ignore
+    }
+
     return NextResponse.json({ explanation });
   } catch (err) {
     console.error("[AI Explain Error]", err);

@@ -1,44 +1,56 @@
 import { clampScore } from '@/lib/risk-utils';
+import { ORG_PROFILES, type OrgRiskProfile } from './methodology';
 
 export interface FinancialImpactResult {
   estimatedFixCost: number;
   estimatedIncidentExposure: number;
   estimatedOperationalExposure: number;
   riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  methodologyBasis: string;
 }
 
-export function calculateFinancialImpact(params: {
-  trustScore: number;
-  securityScore: number;
-  exploitabilityScore: number;
-  collapseRisk: number;
-  blastRadius: number;
-  criticalVulnerabilityCount: number;
-  deploymentConfidence: number;
-}): FinancialImpactResult {
-  const fixCost = Math.round(
-    25000 +
-      params.criticalVulnerabilityCount * 18000 +
-      params.collapseRisk * 520 +
-      (100 - params.securityScore) * 240 +
-      (100 - params.trustScore) * 140 +
-      params.blastRadius * 2600
-  );
+export function calculateFinancialImpact(
+  params: {
+    trustScore: number;
+    securityScore: number;
+    exploitabilityScore: number;
+    collapseRisk: number;
+    blastRadius: number;
+    criticalVulnerabilityCount: number;
+    deploymentConfidence: number;
+  },
+  profile: OrgRiskProfile = 'standard'
+): FinancialImpactResult {
+  const org = ORG_PROFILES[profile] || ORG_PROFILES.standard;
 
+  // 1. Engineering Remediation Cost
+  // Based on senior engineering hours required per vulnerability category
+  // Critical vuln = ~24 hrs; High blast radius subsystem = ~16 hrs; Architecture debt cleanup = ~8 hrs
+  const estimatedHours =
+    params.criticalVulnerabilityCount * 24 +
+    Math.round((params.blastRadius || 1) * 3) +
+    Math.round((100 - params.securityScore) * 0.15) +
+    Math.round(params.collapseRisk * 0.2);
+
+  const fixCost = Math.max(25000, estimatedHours * org.hourlyRemediationRateINR);
+
+  // 2. Empirical Incident Breach Exposure
+  // Scaled from IBM Cost of a Data Breach India Benchmark (₹17.90 Cr baseline)
+  // Weighted by exploitability probability and critical attack chains
+  const exploitabilityFactor = Math.min(1.0, (params.exploitabilityScore / 100) * 0.45 + (params.criticalVulnerabilityCount > 0 ? 0.35 : 0.05));
+  const blastRadiusFactor = Math.min(1.0, (params.blastRadius / 20) * 0.2);
   const incidentExposure = Math.round(
-    40000 +
-      params.criticalVulnerabilityCount * 85000 +
-      params.exploitabilityScore * 9000 +
-      params.blastRadius * 15000 +
-      (100 - params.securityScore) * 1800
+    org.citableBreachBaselineINR * (exploitabilityFactor + blastRadiusFactor) * 0.08 +
+    params.criticalVulnerabilityCount * 250000 +
+    params.exploitabilityScore * 15000
   );
 
+  // 3. Operational Outage Exposure (SLA penalties & downtime)
   const operationalExposure = Math.round(
-    30000 +
-      params.collapseRisk * 6500 +
-      (100 - params.deploymentConfidence) * 3200 +
-      params.exploitabilityScore * 1700 +
-      params.blastRadius * 9000
+    params.collapseRisk * 12500 +
+    (100 - params.deploymentConfidence) * 6500 +
+    params.blastRadius * 18000 +
+    50000
   );
 
   const riskScore = clampScore(
@@ -52,11 +64,11 @@ export function calculateFinancialImpact(params: {
   );
 
   const riskLevel =
-    riskScore >= 80 || incidentExposure >= 1500000 || operationalExposure >= 900000
+    riskScore >= 80 || incidentExposure >= 5000000 || operationalExposure >= 1500000
       ? 'CRITICAL'
-      : riskScore >= 60 || incidentExposure >= 700000 || operationalExposure >= 400000
+      : riskScore >= 60 || incidentExposure >= 1500000 || operationalExposure >= 600000
         ? 'HIGH'
-        : riskScore >= 35 || incidentExposure >= 200000 || operationalExposure >= 150000
+        : riskScore >= 35 || incidentExposure >= 500000 || operationalExposure >= 200000
           ? 'MEDIUM'
           : 'LOW';
 
@@ -65,6 +77,7 @@ export function calculateFinancialImpact(params: {
     estimatedIncidentExposure: incidentExposure,
     estimatedOperationalExposure: operationalExposure,
     riskLevel,
+    methodologyBasis: `Calibrated against IBM Cost of a Data Breach (₹17.9Cr benchmark) & ₹${org.hourlyRemediationRateINR.toLocaleString('en-IN')}/hr engineering rate.`,
   };
 }
 

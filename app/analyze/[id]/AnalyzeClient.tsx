@@ -25,8 +25,13 @@ import { ExecutiveCommandCenter } from '@/components/business/ExecutiveCommandCe
 import { FinancialImpactCard } from '@/components/business/FinancialImpactCard';
 import { ComplianceScoreCard } from '@/components/business/ComplianceScoreCard';
 import { ComplianceRiskCenter } from '@/components/business/ComplianceRiskCenter';
+import { ComplianceAuditCenter } from '@/components/ComplianceAuditCenter';
 import { RiskTimeline } from '@/components/business/RiskTimeline';
 import BoardReportCard from '@/components/business/BoardReportCard';
+import { HistoricalTrendCard } from '@/components/HistoricalTrendCard';
+import { PeerBenchmarkCard } from '@/components/PeerBenchmarkCard';
+import { ApiKeyManagement } from '@/components/ApiKeyManagement';
+import { DemoTourModal } from '@/components/DemoTourModal';
 import { useViewMode } from '@/contexts/ViewModeContext';
 import { buildBusinessImpactFromNode } from '@/lib/business-intelligence/business-impact';
 import type {
@@ -466,12 +471,19 @@ function AnalyzeContent({ view }: AnalyzeClientProps) {
           </div>
         )}
 
+        <ComplianceAuditCenter analysisId={analysisId} />
+
         {effectiveMode === 'business' && (
           <div id="executive-report" className="grid xl:grid-cols-2 gap-6">
             <BoardReportCard analysis={analysis} />
             <div />
           </div>
         )}
+
+        <div className="grid xl:grid-cols-2 gap-6">
+          <HistoricalTrendCard analysisId={analysisId} />
+          <PeerBenchmarkCard analysisId={analysisId} />
+        </div>
 
         <SecurityOverview analysis={analysis} nodes={nodes} />
 
@@ -558,6 +570,9 @@ function AnalyzeContent({ view }: AnalyzeClientProps) {
             </div>
           </div>
         </div>
+
+        <ApiKeyManagement />
+        <DemoTourModal />
       </div>
     </div>
   );

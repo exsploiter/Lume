@@ -11,7 +11,9 @@
     "test:e2e": "playwright test",
     "test:headed": "playwright test --headed",
     "test:debug": "playwright test --debug",
-    "test:report": "node scripts/generate-test-report.js"
+    "test:report": "node scripts/generate-test-report.js",
+    "test:golden": "npx tsx tests/golden-suite/run-golden-suite.ts",
+    "test:backtest": "npx tsx tests/backtest/run-backtest.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.5.2",

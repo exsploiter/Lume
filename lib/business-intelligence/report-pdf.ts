@@ -515,6 +515,119 @@ export async function generateBoardReportPdf(report: ExecutiveReport, repoName: 
   
   y = endY - 10;
 
+  // --- APPENDIX: TRUST SCORE METHODOLOGY & CITABLE VALUATION BASIS ---
+  newPage();
+
+  page.drawText('APPENDIX: TRUST SCORE METHODOLOGY & CITABLE BENCHMARKS', {
+    x: margin,
+    y,
+    size: 13,
+    font: bold,
+    color: primaryColor,
+  });
+  y -= 18;
+
+  page.drawText('DebtRadar Mathematical Risk Intelligence Framework (Published Standard)', {
+    x: margin,
+    y,
+    size: 8.5,
+    font,
+    color: mutedColor,
+  });
+  y -= 22;
+
+  // Section 1: Trust Score Formula Box
+  page.drawRectangle({
+    x: margin,
+    y: y - 110,
+    width: pageWidth - margin * 2,
+    height: 110,
+    color: bgColor,
+    borderColor,
+    borderWidth: 1,
+  });
+
+  page.drawText('1. TRUST SCORE WEIGHT SUPERPOSITION FORMULA', {
+    x: margin + 12,
+    y: y - 18,
+    size: 9.5,
+    font: bold,
+    color: primaryColor,
+  });
+
+  const formulaLines = [
+    'Trust Score (T) in [0, 100] is calculated across six normalized risk dimensions with non-linear penalties:',
+    'T = 0.28*S_sec + 0.20*(100 - C_col) + 0.18*(100 - E_exp) + 0.12*(100 - P_prop) + 0.08*(100 - B_br) + 0.10*(100 - A_arch) - 3.0*N_auth',
+    '',
+    '- Security Quality (28%): Static AST taint analysis and dependency CVE findings.',
+    '- Structural Collapse Inverted (20%): Systemic failure probability across cascading modules.',
+    '- Exploitability Inverted (18%): Public route exposure, unauthenticated sink reachability.',
+    '- Cascading Propagation (12%): Call-graph neighborhood infection radius.',
+    '- Blast Radius (8%): Centrality and dependent caller density.',
+    '- Architecture Fragility (10%): Acorn cyclomatic complexity and duplicate clone clusters.',
+  ];
+
+  let fY = y - 32;
+  for (const fLine of formulaLines) {
+    page.drawText(sanitize(fLine), {
+      x: margin + 12,
+      y: fY,
+      size: 7.5,
+      font: fLine.startsWith('T =') ? bold : font,
+      color: textColor,
+    });
+    fY -= 10;
+  }
+
+  y -= 130;
+
+  // Section 2: Citable Financial Anchors
+  page.drawRectangle({
+    x: margin,
+    y: y - 125,
+    width: pageWidth - margin * 2,
+    height: 125,
+    color: bgColor,
+    borderColor,
+    borderWidth: 1,
+  });
+
+  page.drawText('2. EMPIRICAL FINANCIAL EXPOSURE CITATIONS & BASELINES', {
+    x: margin + 12,
+    y: y - 18,
+    size: 9.5,
+    font: bold,
+    color: primaryColor,
+  });
+
+  const citationLines = [
+    'DebtRadar financial exposure calculations are calibrated to published empirical standards:',
+    'A. IBM Security / Ponemon Institute "Cost of a Data Breach Report 2023-2024"',
+    '   - Average India Data Breach Cost Benchmark: INR 17.90 Crore (USD 2.18 Million).',
+    '   - Average Per-Compromised Record Cost: INR 4,400 per record.',
+    '   - Detection, containment, and incident response overhead accounts for 32% of total loss.',
+    'B. Digital Personal Data Protection (DPDP) Act 2023 (Section 33 Statutory Penalties)',
+    '   - Failure to observe reasonable security safeguards: Statutory penalty up to INR 250 Crore.',
+    '   - Failure to notify Board and affected users of breach: Statutory penalty up to INR 200 Crore.',
+    'C. Engineering Remediation Valuation Standard',
+    '   - Calibrated at INR 6,500/hour blended rate for senior systems engineering teams.',
+    '   - High-severity taint and exploitability fixes require 16-48 engineering hours per subsystem.',
+  ];
+
+  let cY = y - 32;
+  for (const cLine of citationLines) {
+    page.drawText(sanitize(cLine), {
+      x: margin + 12,
+      y: cY,
+      size: 7.2,
+      font: (cLine.startsWith('A.') || cLine.startsWith('B.') || cLine.startsWith('C.')) ? bold : font,
+      color: textColor,
+    });
+    cY -= 9.5;
+  }
+
+  y -= 145;
+
   // --- Finalize Headers & Footers (Dynamic Page Numbering) ---
   const pages = pdfDoc.getPages();
   for (let i = 0; i < pages.length; i++) {

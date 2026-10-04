@@ -11,6 +11,8 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { URLInput } from '@/components/URLInput';
+import { SampleRepoSelector } from '@/components/SampleRepoSelector';
+import { DemoTourModal } from '@/components/DemoTourModal';
 
 const FEATURES = [
   {
@@ -96,7 +98,11 @@ export default function HomePage() {
         {error && (
           <p className="mt-4 text-accent-rose text-sm font-semibold">{error}</p>
         )}
+
+        <SampleRepoSelector />
       </section>
+
+      <DemoTourModal />
 
       <section className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
         {FEATURES.map((f) => (

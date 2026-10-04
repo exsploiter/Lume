@@ -350,3 +350,120 @@ export interface ASTSymbol {
   calls: string[];
   calledBy: string[];
 }
+
+export interface TrendDataPoint {
+  analysisId: string;
+  timestamp: string;
+  trustScore: number;
+  repoSecurityScore: number;
+  collapseScore: number;
+  repoExploitabilityScore: number;
+  criticalVulnerabilities: number;
+  totalVulnerabilities: number;
+  avgDebtScore: number;
+  totalFiles: number;
+  totalNodes: number;
+  recommendation: 'SAFE TO SHIP' | 'NEEDS REVIEW' | 'HIGH RISK' | 'DEPLOYMENT NOT RECOMMENDED';
+}
+
+export interface HistoricalTrendResult {
+  repoUrl: string;
+  repoOwner: string;
+  repoName: string;
+  totalScans: number;
+  history: TrendDataPoint[];
+  trajectory: 'improving' | 'degrading' | 'stable' | 'insufficient_data';
+  trustScoreDelta: number;
+  securityScoreDelta: number;
+  criticalVulnDelta: number;
+  exploitabilityDelta: number;
+  summary: string;
+  insights: string[];
+}
+
+export interface MetricBenchmark {
+  metric: string;
+  targetValue: number;
+  cohortMedian: number;
+  cohortTop10: number;
+  cohortBottom10: number;
+  percentile: number;
+  tier: 'Top 10%' | 'Top Quartile' | 'Above Average' | 'Below Average' | 'Bottom Quartile';
+  status: 'positive' | 'neutral' | 'negative';
+}
+
+export interface PeerBenchmarkResult {
+  analysisId: string;
+  repoUrl: string;
+  cohortSize: number;
+  overallPercentile: number;
+  overallTier: 'Top 10%' | 'Top Quartile' | 'Above Average' | 'Below Average' | 'Bottom Quartile';
+  metrics: MetricBenchmark[];
+  sizeCohort: 'Small (< 20 files)' | 'Medium (20-100 files)' | 'Large (> 100 files)';
+  insights: string[];
+  recommendations: string[];
+}
+
+export type ComplianceFrameworkType =
+  | 'SOC2'
+  | 'ISO27001'
+  | 'PCI_DSS'
+  | 'HIPAA'
+  | 'OWASP_TOP10';
+
+export interface FrameworkControl {
+  id: string;
+  framework: ComplianceFrameworkType;
+  title: string;
+  category: string;
+  description: string;
+  auditRequirement: string;
+  keywords: string[];
+  requiresZeroCritical: boolean;
+  status: 'PASS' | 'WARNING' | 'FAIL';
+  findingCount: number;
+  criticalFindingCount: number;
+  violatingFiles: string[];
+  remediationGuidance: string;
+}
+
+export interface FrameworkEvaluation {
+  framework: ComplianceFrameworkType;
+  displayName: string;
+  version: string;
+  readinessScore: number;
+  status: 'AUDIT_READY' | 'MINOR_GAPS' | 'NON_COMPLIANT';
+  totalControls: number;
+  passingControls: number;
+  warningControls: number;
+  failingControls: number;
+  controls: FrameworkControl[];
+  summary: string;
+}
+
+export interface ComprehensiveComplianceAudit {
+  analysisId: string;
+  repoUrl: string;
+  repoOwner: string;
+  repoName: string;
+  timestamp: string;
+  overallReadinessScore: number;
+  overallGrade: 'Excellent' | 'Strong' | 'Moderate' | 'Needs Improvement' | 'High Risk';
+  frameworks: Record<ComplianceFrameworkType, FrameworkEvaluation>;
+  criticalGaps: string[];
+  remediationRoadmap: {
+    priority: 'P0' | 'P1' | 'P2';
+    controlId: string;
+    framework: ComplianceFrameworkType;
+    action: string;
+    estimatedEffort: string;
+  }[];
+  auditMetadata: {
+    engineVersion: string;
+    totalFilesScanned: number;
+    totalSymbolsParsed: number;
+    findingsEvaluated: number;
+  };
+}
+
+

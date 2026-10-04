@@ -4,6 +4,7 @@ import { cookies } from 'next/headers';
 import type { AnalysisRecord, DebtNode } from '@/types';
 import {
   createLocalAnalysisId,
+  loadAllLocalAnalyses,
   loadLocalAnalysisRecord,
   loadLocalDebtNodes,
   saveLocalAnalysisRecord,
@@ -144,13 +145,24 @@ export async function updateAnalysisProgress(
       return;
     }
   } catch (err) {
-    if (isSupabaseUnavailableError(err)) {
-      await updateLocalAnalysisRecord(analysisId, updates as Partial<AnalysisRecord>);
-      return;
+    if (!isSupabaseUnavailableError(err)) {
+      console.error(`[Supabase Error] Exception thrown during update progress for ${analysisId}:`, err);
     }
-
-    console.error(`[Supabase Error] Exception thrown during update progress for ${analysisId}:`, err);
     await updateLocalAnalysisRecord(analysisId, updates as Partial<AnalysisRecord>);
+  } finally {
+    try {
+      const { progressEmitter } = await import('@/lib/job-queue/progress-emitter');
+      progressEmitter.emitProgress({
+        analysisId,
+        status: updates.status ?? 'in-progress',
+        progress: updates.progress ?? 0,
+        message: updates.progress_message ?? '',
+        timestamp: Date.now(),
+        data: updates as Record<string, unknown>,
+      });
+    } catch {
+      // ignore emission errors in edge contexts
+    }
   }
 }
 
@@ -257,3 +269,70 @@ export async function updateNodeExplanation(
 
   await updateLocalNodeExplanation(nodeId, explanation);
 }
+
+function normalizeRepoUrl(url?: string | null): string {
+  if (!url) return '';
+  return url.trim().toLowerCase().replace(/\.git$/, '').replace(/\/$/, '');
+}
+
+export async function getHistoricalAnalysesForRepo(
+  repoUrl: string,
+  limit: number = 20
+): Promise<AnalysisRecord[]> {
+  const normalizedTarget = normalizeRepoUrl(repoUrl);
+  
+  try {
+    const supabase = createServiceClient();
+    const { data, error } = await supabase
+      .from('analyses')
+      .select('*')
+      .ilike('repo_url', `%${normalizedTarget.replace(/https?:\/\/[^/]+\//, '')}%`)
+      .order('created_at', { ascending: true })
+      .limit(limit);
+
+    if (!error && data && data.length > 0) {
+      return data as AnalysisRecord[];
+    }
+  } catch (error) {
+    if (!isSupabaseUnavailableError(error)) {
+      console.warn(`[Supabase] Falling back to local store for repo history (${repoUrl}):`, error);
+    }
+  }
+
+  const allLocal = await loadAllLocalAnalyses();
+  const matched = allLocal.filter((record) => {
+    const recordNorm = normalizeRepoUrl(record.repo_url);
+    return recordNorm === normalizedTarget || recordNorm.includes(normalizedTarget) || normalizedTarget.includes(recordNorm);
+  });
+
+  matched.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+  return matched.slice(-limit);
+}
+
+export async function getAllCompletedAnalyses(
+  limit: number = 100
+): Promise<AnalysisRecord[]> {
+  try {
+    const supabase = createServiceClient();
+    const { data, error } = await supabase
+      .from('analyses')
+      .select('*')
+      .eq('status', 'complete')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (!error && data && data.length > 0) {
+      return data as AnalysisRecord[];
+    }
+  } catch (error) {
+    if (!isSupabaseUnavailableError(error)) {
+      console.warn('[Supabase] Falling back to local store for completed analyses:', error);
+    }
+  }
+
+  const allLocal = await loadAllLocalAnalyses();
+  const completed = allLocal.filter((record) => record.status === 'complete' || record.progress >= 100);
+  completed.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+  return completed.slice(0, limit);
+}
+

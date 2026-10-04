@@ -110,3 +110,22 @@ export async function updateLocalNodeExplanation(nodeId: string, explanation: st
 export function createLocalAnalysisId() {
   return randomUUID();
 }
+
+export async function loadAllLocalAnalyses(): Promise<AnalysisRecord[]> {
+  await ensureStore();
+  try {
+    const files = await readdir(ANALYSES_DIR, { withFileTypes: true });
+    const records: AnalysisRecord[] = [];
+    for (const entry of files) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      const filePath = path.join(ANALYSES_DIR, entry.name);
+      const bundle = await readBundleByPath(filePath);
+      if (bundle?.analysis && bundle.analysis.id) {
+        records.push(bundle.analysis as AnalysisRecord);
+      }
+    }
+    return records;
+  } catch {
+    return [];
+  }
+}

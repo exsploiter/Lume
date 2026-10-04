@@ -1,0 +1,89 @@
+name: DebtRadar Quality & Security Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main, master, develop]
+
+jobs:
+  debtradar-gate:
+    name: DebtRadar Architecture & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Trigger DebtRadar Analysis & Quality Gate
+        env:
+          DEBTRADAR_URL: ${{ secrets.DEBTRADAR_URL || 'https://debtradar.dev' }}
+          DEBTRADAR_API_KEY: ${{ secrets.DEBTRADAR_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Initiating DebtRadar Risk Intelligence Gate..."
+          
+          REPO_URL="https://github.com/${{ github.repository }}"
+          COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          PR_NUMBER="${{ github.event.pull_request.number || '' }}"
+
+          # Trigger analysis with CI context
+          RESPONSE=$(curl -s -X POST "${DEBTRADAR_URL}/api/analyze" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${DEBTRADAR_API_KEY}" \
+            -d "{
+              \"repoUrl\": \"${REPO_URL}\",
+              \"commitSha\": \"${COMMIT_SHA}\",
+              \"prNumber\": ${PR_NUMBER:-null},
+              \"gateConfig\": {
+                \"minTrustScore\": 60,
+                \"maxCriticalVulns\": 0,
+                \"failOnCollapse\": true
+              }
+            }")
+
+          ANALYSIS_ID=$(echo "$RESPONSE" | grep -o '"analysisId":"[^"]*' | cut -d'"' -f4)
+
+          if [ -z "$ANALYSIS_ID" ]; then
+            echo "Failed to start DebtRadar analysis:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+
+          echo "Analysis started (ID: $ANALYSIS_ID). Polling gate status..."
+
+          # Poll gate evaluation endpoint until complete or max 60 iterations (5 mins)
+          for i in {1..60}; do
+            sleep 5
+            GATE_STATUS=$(curl -s "${DEBTRADAR_URL}/api/ci/gate?analysisId=${ANALYSIS_ID}&commitSha=${COMMIT_SHA}")
+            STATUS=$(echo "$GATE_STATUS" | grep -o '"status":"[^"]*' | cut -d'"' -f4)
+
+            if [ "$STATUS" = "complete" ]; then
+              PASSED=$(echo "$GATE_STATUS" | grep -o '"passed":[^,}]*' | cut -d':' -f2)
+              TRUST_SCORE=$(echo "$GATE_STATUS" | grep -o '"trustScore":[^,}]*' | cut -d':' -f2)
+              CRITICAL_VULNS=$(echo "$GATE_STATUS" | grep -o '"criticalVulnerabilities":[^,}]*' | cut -d':' -f2)
+
+              echo "----------------------------------------"
+              echo "DebtRadar Quality Gate Result:"
+              echo "Passed: $PASSED"
+              echo "Trust Score: $TRUST_SCORE / 100"
+              echo "Critical Vulnerabilities: $CRITICAL_VULNS"
+              echo "----------------------------------------"
+
+              if [ "$PASSED" = "true" ]; then
+                echo "✅ DebtRadar Quality Gate Passed!"
+                exit 0
+              else
+                echo "❌ DebtRadar Quality Gate Failed!"
+                exit 1
+              fi
+            elif [ "$STATUS" = "failed" ]; then
+              echo "❌ DebtRadar analysis job failed during execution."
+              exit 1
+            else
+              PROGRESS=$(echo "$GATE_STATUS" | grep -o '"progress":[^,}]*' | cut -d':' -f2)
+              echo "Scan in progress... ($PROGRESS%)"
+            fi
+          done
+
+          echo "⏱️ Timed out waiting for DebtRadar scan."
+          exit 1

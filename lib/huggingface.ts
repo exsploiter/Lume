@@ -131,65 +131,28 @@ export async function generateDebtExplanation(context: {
   cweCategories?: string[];
   securityFindings?: Array<{ title: string; severity: string; recommendation: string; evidence: string }>;
 }): Promise<string> {
-  // Truncate fields to verify and handle token limits (Requirement 16)
+  const { getActivePrompt, ACTIVE_PROMPT_VERSION } = await import('@/lib/ai/prompt-registry');
+  const { getCachedExplanation, setCachedExplanation } = await import('@/lib/ai/explanation-cache');
+
+  // 1. Explanation Caching lookup
+  const cached = getCachedExplanation(context, ACTIVE_PROMPT_VERSION);
+  if (cached) {
+    console.log(`[AI Explanation Cache] Hit for ${context.symbolName} in ${context.filePath}`);
+    return cached;
+  }
+
   const truncatedPath = (context.filePath || '').slice(0, 200);
   const truncatedSymbol = (context.symbolName || '').slice(0, 100);
   const truncatedCode = (context.codeSnippet || '').slice(0, 1000);
-  const securitySummary = [
-    `Security score: ${context.securityScore ?? 0}/100`,
-    `Vulnerabilities: ${context.vulnerabilityCount ?? 0}`,
-    `Risk level: ${context.securityRiskLevel ?? 'none'}`,
-    `OWASP: ${(context.owaspCategories ?? []).join(', ') || 'none'}`,
-    `CWE: ${(context.cweCategories ?? []).join(', ') || 'none'}`,
-  ].join('\n');
-  const securityFindings = (context.securityFindings ?? [])
-    .slice(0, 6)
-    .map((finding) => `- [${finding.severity}] ${finding.title}: ${finding.evidence}`)
-    .join('\n');
 
-  const prompt = `<s>[INST] You are a senior software architect.
+  const { prompt } = getActivePrompt(context, ACTIVE_PROMPT_VERSION);
 
-Write a technical-only explanation for engineers. Do not mention business impact, customers, executives, or finance.
+  let finalExplanation = '';
 
-Analyze this code symbol for technical debt, security vulnerabilities, exploitability, propagation risk, and remediation steps.
-
-Return strict JSON:
-{
-  "summary": "",
-  "rootCause": "",
-  "technicalRisk": "",
-  "codeLevelImpact": "",
-  "recommendedFixes": [],
-  "priorityLevel": ""
-}
-
-File: ${truncatedPath}
-Symbol: ${truncatedSymbol}
-Debt Score: ${context.debtScore}/100
-Complexity: ${context.complexity}
-Blast Radius: ${context.blastRadius} dependent symbols
-${securitySummary}
-
-Security Findings:
-${securityFindings || '- none'}
-
-Code:
-\`\`\`
-${truncatedCode}
-\`\`\`
-
-Technical writing rules:
-- explain the root cause in code terms
-- describe the exact failure mode and propagation path
-- describe why the issue is hard to maintain or secure
-- recommend code-level fixes only
-
-Provide only JSON. [/INST]`;
   try {
     const raw = await callHF(EXPLANATION_MODEL, prompt, { max_new_tokens: 380 });
     const parsed = parseSecurityExplanation(raw);
-    if (parsed) return parsed;
-    return raw;
+    finalExplanation = parsed || raw;
   } catch (err) {
     console.warn("[HuggingFace] Primary model failed due to offline state or timeout. Attempting fallback model...");
     try {
@@ -201,12 +164,16 @@ Score: ${context.debtScore}
 Code: ${truncatedCode.slice(0, 400)}`;
       const raw = await callHF(FALLBACK_MODEL, fallbackPrompt, { max_new_tokens: 150 });
       const parsed = parseSecurityExplanation(raw);
-      return parsed ?? raw;
+      finalExplanation = parsed ?? raw;
     } catch (fallbackErr) {
       console.warn("[HuggingFace] Fallback model also failed (network unreachable). Gracefully fallback to custom local heuristic explanation.");
-      return generateSecurityHeuristicExplanation(context);
+      finalExplanation = generateSecurityHeuristicExplanation(context);
     }
   }
+
+  // Save into explanation cache
+  setCachedExplanation(context, ACTIVE_PROMPT_VERSION, finalExplanation);
+  return finalExplanation;
 }
 
 function parseSecurityExplanation(raw: string): string | null {

@@ -268,6 +268,21 @@ ${explanation}
         token,
       });
 
+      const { logAuditEvent } = await import('@/lib/security/audit-logger');
+      await logAuditEvent({
+        eventType: 'PR_CREATION',
+        severity: 'info',
+        status: 'success',
+        repo: `${repoOwner}/${repoName}`,
+        details: {
+          prUrl: prResult.htmlUrl,
+          prNumber: prResult.number,
+          filePath,
+          issueType,
+          estimatedDebtReduction,
+        },
+      });
+
       return NextResponse.json({
         success: true,
         prUrl: prResult.htmlUrl,

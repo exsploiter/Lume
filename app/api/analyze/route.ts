@@ -13,8 +13,18 @@ import { isSecuritySensitivePath } from '@/lib/security/security-utils';
 import { analyzeExploitabilityRepository } from '@/lib/exploitability/exploitability-engine';
 import { buildSecurityAttackGraph } from '@/lib/attack-graph/graph-builder';
 import { buildCollapsePrediction } from '@/lib/collapse/collapse-engine';
+import { scanDependenciesWithOSV } from '@/lib/security/sca-scanner';
 
+export const runtime = 'nodejs';
 export const maxDuration = 300;
+
+export interface CiCdContext {
+  commitSha?: string;
+  prNumber?: number;
+  branch?: string;
+  gateConfig?: import('@/lib/github-gate').CiGateConfig;
+  token?: string;
+}
 
 export async function POST(request: NextRequest) {
   // 1. Startup validation (Requirement 2)
@@ -32,6 +42,16 @@ export async function POST(request: NextRequest) {
     if (!repoUrl) {
       return NextResponse.json({ error: 'repoUrl is required' }, { status: 400 });
     }
+
+    const ciContext: CiCdContext | undefined = (body.commitSha || body.prNumber || body.gateConfig)
+      ? {
+          commitSha: body.commitSha,
+          prNumber: body.prNumber,
+          branch: body.branch,
+          gateConfig: body.gateConfig,
+          token: body.token,
+        }
+      : undefined;
 
     const parsed = parseGitHubUrl(repoUrl);
     if (!parsed) {
@@ -75,8 +95,17 @@ export async function POST(request: NextRequest) {
     const analysisId = analysis.id as string;
     console.log(`[Pipeline] Job enqueued successfully. Job ID: ${analysisId}`);
 
+    const { logAuditEvent } = await import('@/lib/security/audit-logger');
+    await logAuditEvent({
+      eventType: 'SCAN_INITIATED',
+      severity: 'info',
+      status: 'in_progress',
+      repo: `${parsed.owner}/${parsed.repo}`,
+      details: { analysisId, repoUrl },
+    });
+
     // Offload parsing pipeline directly from the request lifecycle (Requirement 12)
-    runPipelineWithTimeout(analysisId, parsed.owner, parsed.repo).catch(async (err) => {
+    runPipelineWithTimeout(analysisId, parsed.owner, parsed.repo, ciContext).catch(async (err) => {
       console.error(`[Pipeline Error] Critical worker error in Job ${analysisId}:`, err);
       try {
         const isRateLimit = err instanceof Error && err.message.toLowerCase().includes('rate limit');
@@ -86,6 +115,30 @@ export async function POST(request: NextRequest) {
           error_message: err instanceof Error ? err.message : 'Job failed',
           progress_message: isRateLimit ? 'Waiting for GitHub API quota reset...' : 'Analysis job failed',
         });
+        await logAuditEvent({
+          eventType: 'SCAN_FAILED',
+          severity: 'error',
+          status: 'failure',
+          repo: `${parsed.owner}/${parsed.repo}`,
+          details: { analysisId, error: err instanceof Error ? err.message : 'Job failed' },
+          error: err instanceof Error ? err.message : 'Job failed',
+        });
+        if (ciContext?.commitSha) {
+          try {
+            const { createCommitStatus } = await import('@/lib/github-status');
+            await createCommitStatus({
+              owner: parsed.owner,
+              repo: parsed.repo,
+              sha: ciContext.commitSha,
+              state: 'error',
+              description: `DebtRadar analysis failed: ${err instanceof Error ? err.message : 'Internal error'}`,
+              context: 'debtradar/risk-gate',
+              token: ciContext.token,
+            });
+          } catch {
+            // ignore
+          }
+        }
         console.log(`[Pipeline] Job ${analysisId} finished with status: failed (Rate limit hit: ${isRateLimit})`);
       } catch (subErr) {
         console.error(`[Pipeline Error] Failed to update fail status for ${analysisId}:`, subErr);
@@ -107,7 +160,8 @@ export async function POST(request: NextRequest) {
 async function runPipelineWithTimeout(
   analysisId: string,
   owner: string,
-  repo: string
+  repo: string,
+  ciContext?: CiCdContext
 ): Promise<void> {
   const MAX_RUNTIME_MS = 280000; // 4.6 minutes
 
@@ -117,7 +171,7 @@ async function runPipelineWithTimeout(
     }, MAX_RUNTIME_MS);
   });
 
-  const pipelinePromise = runPipeline(analysisId, owner, repo);
+  const pipelinePromise = runPipeline(analysisId, owner, repo, ciContext);
 
   return Promise.race([pipelinePromise, timeoutPromise]);
 }
@@ -125,8 +179,26 @@ async function runPipelineWithTimeout(
 async function runPipeline(
   analysisId: string,
   owner: string,
-  repo: string
+  repo: string,
+  ciContext?: CiCdContext
 ): Promise<void> {
+  // If CI/CD context is provided, mark commit status as pending
+  if (ciContext?.commitSha) {
+    try {
+      const { createCommitStatus } = await import('@/lib/github-status');
+      await createCommitStatus({
+        owner,
+        repo,
+        sha: ciContext.commitSha,
+        state: 'pending',
+        description: 'DebtRadar: Analyzing architecture health and security risk...',
+        context: 'debtradar/risk-gate',
+        token: ciContext.token,
+      });
+    } catch (e) {
+      console.warn('[CI/CD Gate] Failed to set initial pending status:', e);
+    }
+  }
   // 1. Fetch Repository files
   console.log("[Pipeline] Progress: 10");
   await updateAnalysisProgress(analysisId, {
@@ -135,13 +207,16 @@ async function runPipeline(
     progress_message: 'fetching repo',
   });
 
-  const files = await fetchRepositoryFiles(owner, repo, async (msg: string) => {
+  const { fetchRepositoryFilesIncremental } = await import('@/lib/github');
+  const fetchResult = await fetchRepositoryFilesIncremental(owner, repo, async (msg: string) => {
     await updateAnalysisProgress(analysisId, {
       status: 'fetching',
       progress: 15,
       progress_message: msg,
     });
   });
+
+  const files = fetchResult.files;
 
   console.log("[Pipeline] Progress: 25");
   await updateAnalysisProgress(analysisId, {
@@ -208,8 +283,16 @@ async function runPipeline(
   await updateAnalysisProgress(analysisId, {
     status: 'scoring',
     progress: 52,
-    progress_message: 'security analysis',
+    progress_message: 'security analysis & SCA dependency scan',
   });
+
+  let scaResult = { dependenciesFound: [], findings: [], vulnerableCount: 0 } as Awaited<ReturnType<typeof scanDependenciesWithOSV>>;
+  try {
+    scaResult = await scanDependenciesWithOSV(files);
+    console.log(`[SCA] Scan complete: ${scaResult.dependenciesFound.length} dependencies analyzed, ${scaResult.vulnerableCount} vulnerabilities found.`);
+  } catch (scaErr) {
+    console.warn('[Pipeline Warning] SCA dependency scan failed, proceeding:', scaErr);
+  }
 
   let securityResult = null as Awaited<ReturnType<typeof analyzeSecurityRepository>> | null;
   try {
@@ -217,6 +300,7 @@ async function runPipeline(
       files,
       symbols,
       blastRadiusMap: new Map<string, number>(),
+      scaFindings: scaResult.findings,
     });
   } catch (securityErr) {
     console.error('[Pipeline Warning] Security detection failed:', securityErr);
@@ -249,6 +333,7 @@ async function runPipeline(
         files,
         symbols,
         blastRadiusMap,
+        scaFindings: scaResult.findings,
       });
     } catch (securityErr) {
       console.error('[Pipeline Warning] Security analysis retry failed:', securityErr);
@@ -460,4 +545,113 @@ async function runPipeline(
   });
   
   console.log(`[Pipeline] Job ${analysisId} completed successfully.`);
+
+  // Report CI/CD Gate evaluation to GitHub if commitSha is present
+  if (ciContext?.commitSha) {
+    try {
+      const { evaluateCiGate } = await import('@/lib/github-gate');
+      const { createCommitStatus, createOrUpdateCheckRun, postOrUpdatePRComment } = await import('@/lib/github-status');
+      const { getAnalysis } = await import('@/lib/supabase/server');
+
+      const completedAnalysis = await getAnalysis(analysisId);
+      if (completedAnalysis) {
+        const gateResult = evaluateCiGate(completedAnalysis, ciContext.gateConfig, {
+          owner,
+          repo,
+          commitSha: ciContext.commitSha,
+          prNumber: ciContext.prNumber,
+        });
+
+        // 1. Post commit status
+        await createCommitStatus({
+          owner,
+          repo,
+          sha: ciContext.commitSha,
+          state: gateResult.state,
+          description: gateResult.summaryText,
+          context: 'debtradar/risk-gate',
+          token: ciContext.token,
+        });
+
+        // 2. Post check run
+        await createOrUpdateCheckRun({
+          owner,
+          repo,
+          headSha: ciContext.commitSha,
+          status: 'completed',
+          conclusion: gateResult.passed ? 'success' : 'failure',
+          title: `DebtRadar Quality Gate: ${gateResult.verdict}`,
+          summary: gateResult.summaryText,
+          text: gateResult.markdownReport,
+          token: ciContext.token,
+        });
+
+        // 3. Post PR comment if triggered on pull request
+        if (ciContext.prNumber) {
+          await postOrUpdatePRComment({
+            owner,
+            repo,
+            pullNumber: ciContext.prNumber,
+            body: gateResult.markdownReport,
+            token: ciContext.token,
+          });
+        }
+
+        const { logAuditEvent } = await import('@/lib/security/audit-logger');
+        await logAuditEvent({
+          eventType: 'CI_GATE_EVALUATED',
+          severity: gateResult.passed ? 'info' : 'warn',
+          status: gateResult.passed ? 'success' : 'failure',
+          repo: `${owner}/${repo}`,
+          details: {
+            analysisId,
+            commitSha: ciContext.commitSha,
+            prNumber: ciContext.prNumber,
+            verdict: gateResult.verdict,
+            trustScore: gateResult.trustScore,
+            criticalVulns: gateResult.criticalVulnerabilities,
+            reasons: gateResult.reasons,
+          },
+        });
+      }
+    } catch (ciError) {
+      console.warn('[CI/CD Gate] Failed to post final gate status to GitHub:', ciError);
+    }
+  }
+
+  try {
+    const { logAuditEvent } = await import('@/lib/security/audit-logger');
+    await logAuditEvent({
+      eventType: 'SCAN_COMPLETED',
+      severity: 'info',
+      status: 'success',
+      repo: `${owner}/${repo}`,
+      details: {
+        analysisId,
+        totalNodes: topSymbols.length,
+        avgDebtScore: avgScore,
+        securityScore: repoSecurityScore,
+        criticalVulnerabilities: securityResult?.criticalVulnerabilities ?? 0,
+        isIncremental: fetchResult.isIncremental,
+        reusedFiles: fetchResult.reusedCount,
+      },
+    });
+  } catch {
+    // ignore
+  }
+
+  // Save incremental cache snapshot in background
+  try {
+    const { saveRepoSnapshot } = await import('@/lib/incremental/cache');
+    const symbolsByFile = new Map<string, any[]>();
+    for (const sym of symbols) {
+      if (!symbolsByFile.has(sym.filePath)) symbolsByFile.set(sym.filePath, []);
+      symbolsByFile.get(sym.filePath)!.push(sym);
+    }
+    saveRepoSnapshot(owner, repo, fetchResult.branch, fetchResult.filesWithSha, symbolsByFile).catch((e) => {
+      console.warn('[Incremental Cache] Failed to persist snapshot:', e);
+    });
+  } catch {
+    // ignore
+  }
 }

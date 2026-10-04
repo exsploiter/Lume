@@ -290,14 +290,21 @@ async function fetchTreeBFS(owner: string, repo: string, branch: string): Promis
   return allItems;
 }
 
-/**
- * Production-grade repository crawler featuring raw content optimizations and strict filtering (Requirement 5)
- */
-export async function fetchRepositoryFiles(
+export interface FetchRepoResult {
+  files: ParsedFile[];
+  filesWithSha: Array<{ path: string; sha: string; content: string }>;
+  branch: string;
+  isIncremental: boolean;
+  reusedCount: number;
+  changedCount: number;
+  reusedSymbols: any[];
+}
+
+export async function fetchRepositoryFilesIncremental(
   owner: string,
   repo: string,
   onProgress?: (message: string) => Promise<void>
-): Promise<ParsedFile[]> {
+): Promise<FetchRepoResult> {
   console.log("[GitHub] Fetching repo metadata...");
   if (onProgress) await onProgress("Fetching repository metadata...");
 
@@ -340,16 +347,37 @@ export async function fetchRepositoryFiles(
   console.log(`[GitHub] Filtered to ${validBlobs.length} valid source files`);
   const blobsToFetch = validBlobs.slice(0, MAX_FILES);
 
-  const files: ParsedFile[] = [];
-  const CONCURRENCY_LIMIT = 5; // Concurrency limit of 5 (Requirement 8)
+  // Check incremental cache snapshot
+  const { getRepoSnapshot, diffTreeWithSnapshot } = await import('@/lib/incremental/cache');
+  const snapshot = await getRepoSnapshot(owner, repo);
+  const diff = diffTreeWithSnapshot(blobsToFetch, snapshot);
 
+  const files: ParsedFile[] = [...diff.reusedFiles];
+  const filesWithSha: Array<{ path: string; sha: string; content: string }> = diff.reusedFiles.map(rf => {
+    const cachedItem = snapshot?.files[rf.path];
+    return {
+      path: rf.path,
+      sha: cachedItem?.sha || '',
+      content: rf.content,
+    };
+  });
+
+  if (diff.isIncremental) {
+    console.log(`[Incremental Fetch] Cache hit: Reused ${diff.reusedFiles.length} unchanged files. Downloading ${diff.changedBlobs.length} modified/new files.`);
+    if (onProgress) {
+      await onProgress(`Incremental scan: Reused ${diff.reusedFiles.length} files from cache. Downloading ${diff.changedBlobs.length} modified files...`);
+    }
+  }
+
+  const CONCURRENCY_LIMIT = 5;
   const isPublic = !repoMeta.private;
+  const changedBlobs = diff.changedBlobs;
 
-  for (let i = 0; i < blobsToFetch.length; i += CONCURRENCY_LIMIT) {
-    const batch = blobsToFetch.slice(i, i + CONCURRENCY_LIMIT);
+  for (let i = 0; i < changedBlobs.length; i += CONCURRENCY_LIMIT) {
+    const batch = changedBlobs.slice(i, i + CONCURRENCY_LIMIT);
     
     if (onProgress) {
-      await onProgress(`Downloading files [${i + 1}-${Math.min(i + CONCURRENCY_LIMIT, blobsToFetch.length)} of ${blobsToFetch.length}]...`);
+      await onProgress(`Downloading changed files [${i + 1}-${Math.min(i + CONCURRENCY_LIMIT, changedBlobs.length)} of ${changedBlobs.length}]...`);
     }
 
     await Promise.all(
@@ -381,14 +409,36 @@ export async function fetchRepositoryFiles(
 
         if (content !== null && content.trim().length > 0) {
           files.push({ path: blob.path, content });
+          filesWithSha.push({ path: blob.path, sha: blob.sha, content });
         }
       })
     );
   }
 
   const { remaining } = githubClient.getRateLimits();
-  console.log("[GitHub] Download batch complete. API Quota remaining:", remaining);
-  return files;
+  console.log("[GitHub] Download complete. API Quota remaining:", remaining);
+
+  return {
+    files,
+    filesWithSha,
+    branch,
+    isIncremental: diff.isIncremental,
+    reusedCount: diff.reusedFiles.length,
+    changedCount: changedBlobs.length,
+    reusedSymbols: diff.reusedSymbols,
+  };
+}
+
+/**
+ * Production-grade repository crawler featuring raw content optimizations and strict filtering (Requirement 5)
+ */
+export async function fetchRepositoryFiles(
+  owner: string,
+  repo: string,
+  onProgress?: (message: string) => Promise<void>
+): Promise<ParsedFile[]> {
+  const result = await fetchRepositoryFilesIncremental(owner, repo, onProgress);
+  return result.files;
 }
 
 export async function getDefaultBranch(owner: string, repo: string): Promise<string> {
